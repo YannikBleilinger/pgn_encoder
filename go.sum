@@ -1,2 +1,4 @@
 github.com/corentings/chess v0.0.0-20241113092200-3f44c4e3e959 h1:B5Fq6d2MB3li9PXDkm3hR7iMOCgJS6m+igsjtGe2iHA=
 github.com/corentings/chess v0.0.0-20241113092200-3f44c4e3e959/go.mod h1:JBpJId2nojl6rPpbdVJn7FZOATH0Z28vaU+BEp9ttKA=
+gonum.org/v1/hdf5 v0.0.0-20210714002203-8c5d23bc6946 h1:vJpL69PeUullhJyKtTjHjENEmZU3BkO4e+fod7nKzgM=
+gonum.org/v1/hdf5 v0.0.0-20210714002203-8c5d23bc6946/go.mod h1:BQUWDHIAygjdt1HnUPQ0eWqLN2n5FwJycrpYUVUOx2I=
