@@ -3,10 +3,10 @@ package main
 import (
 	"bufio"
 	"database/sql"
-	"errors"
 	"fmt"
 	"github.com/corentings/chess/v2"
 	_ "github.com/mattn/go-sqlite3"
+	"io"
 	"log"
 	"os"
 	"runtime"
@@ -109,7 +109,7 @@ func main() {
 		//go pgnToFen(gameChan, &wgParse, &seen, fileCmdChan)
 		go pgnToFen(gameChan, &wgParse, posChan)
 	}
-	totalGames := 1_000_000
+	totalGames := 200_000
 	currentGames := 0
 	fmt.Println("Starting to process games")
 	var chunk strings.Builder
@@ -143,10 +143,6 @@ func main() {
 		chunk.WriteString(line + "\n")
 	}
 
-	if chunk.Len() > 0 {
-		gameChan <- chunk.String()
-	}
-
 	if err := scanner.Err(); err != nil {
 		log.Fatalf("Scan failed: %v", err)
 	}
@@ -157,25 +153,20 @@ func main() {
 	wgWrite.Wait()
 
 	err = pprof.WriteHeapProfile(memF)
-
-	var count int
-	db.QueryRow("SELECT COUNT(*) FROM positions").Scan(&count)
-	fmt.Printf("Result: %v\n", count)
 }
 
 func pgnToFen(c <-chan string, wg *sync.WaitGroup, posChan chan positionStruct) {
 	defer wg.Done()
 	for pgnString := range c {
 		pgn, err := chess.PGN(strings.NewReader(pgnString))
-		if err != nil {
-			fmt.Printf("Error parsing pgn: %v\n", err)
-		}
+		check(err)
 		game := chess.NewGame(pgn)
 		for i, position := range game.Positions() {
 			// skip last "checkmate" board state
 			if i == len(game.Positions())-1 {
 				break
 			}
+
 			move := game.Moves()[i]
 			var moveIdx int16 = -1
 			if move.Promo() != chess.NoPieceType {
@@ -194,9 +185,184 @@ func pgnToFen(c <-chan string, wg *sync.WaitGroup, posChan chan positionStruct) 
 				currentElo = int16(elo)
 				check(err)
 			}
-			posChan <- positionStruct{position.String(), moveIdx, currentElo}
+			posChan <- positionStruct{game.FEN(), moveIdx, currentElo}
 		}
 	}
+}
+
+func processPGN(c chan string, wg *sync.WaitGroup, seen *sync.Map, fileCmdChan chan fileCmd) {
+	defer wg.Done()
+	//resultCh := make(chan int64, 1)
+	for pgnString := range c {
+		pgn, err := chess.PGN(strings.NewReader(pgnString))
+		check(err)
+		game := chess.NewGame(pgn)
+		for i, position := range game.Positions() {
+			// skip last "checkmate" board state
+			if i == len(game.Positions())-1 {
+				break
+			}
+			move := game.Moves()[i] // move for current position
+			moveStart := int8(move.S1())
+			moveEnd := int8(move.S2())
+			// if a move is a promotion ove
+			switch move.Promo() {
+			case chess.Queen:
+			case chess.Rook:
+			case chess.Bishop:
+			case chess.Knight:
+			default:
+
+			}
+
+			var rec [recordSize]byte
+			pos := 0
+			// serialize board
+			board := position.Board()
+			for row := 0; row < 65; row++ {
+				var v [7]int8
+				if row == 0 {
+					v = getGlobalVector(position)
+				} else {
+					v = getSquareVector(board.Piece(chess.Square(row - 1)))
+				}
+				for col := 0; col < 7; col++ {
+					rec[pos] = byte(v[col])
+
+					//rec[pos] = byte(uint8(encodedBoard[row][col]))
+					pos++
+				}
+			}
+
+			rec[pos] = byte(moveStart)
+			rec[pos+1] = byte(moveEnd)
+			// get elo from player on turn
+			var currentElo int
+			if position.Turn() == chess.White {
+				elo, err := strconv.ParseInt(game.GetTagPair("WhiteElo"), 10, 64)
+				currentElo = int(elo)
+				check(err)
+			} else {
+				elo, err := strconv.ParseInt(game.GetTagPair("BlackElo"), 10, 64)
+				currentElo = int(elo)
+				check(err)
+			}
+			fmt.Println(currentElo)
+		}
+	}
+}
+
+// vector: [color, isKing, isQueen, isRook, isBishop, isKnight, isPawn]
+func getSquareVector(piece chess.Piece) [7]int8 {
+	var vector [7]int8
+	var sigColor int8 = 0
+	// set color at index 0
+	if piece.Color() == chess.White {
+		sigColor = 1
+	} else {
+		sigColor = -1
+	}
+
+	vector[0] = sigColor
+	index := -1
+	switch piece.Type() {
+	case chess.King:
+		index = 1
+	case chess.Queen:
+		index = 2
+	case chess.Rook:
+		index = 3
+	case chess.Bishop:
+		index = 4
+	case chess.Knight:
+		index = 5
+	case chess.Pawn:
+		index = 6
+	default:
+		return [7]int8{}
+	}
+	vector[index] = 1 // -1 for black, 1 for white
+	return vector
+}
+
+func getGlobalVector(position *chess.Position) [7]int8 {
+	var vector [7]int8
+	var castlingRights = position.CastleRights()
+	// set castling rights
+	if castlingRights.CanCastle(chess.White, chess.KingSide) {
+		vector[0] = 1
+	}
+	if castlingRights.CanCastle(chess.White, chess.QueenSide) {
+		vector[1] = 1
+	}
+	if castlingRights.CanCastle(chess.Black, chess.KingSide) {
+		vector[2] = 1
+	}
+	if castlingRights.CanCastle(chess.Black, chess.QueenSide) {
+		vector[3] = 1
+	}
+
+	// set en passant square
+	enPassantSquare := position.EnPassantSquare()
+	if enPassantSquare != chess.NoSquare {
+		vector[4] = int8(enPassantSquare)
+	} else {
+		vector[4] = 0
+	}
+	// set turn
+	if position.Turn() == chess.White {
+		vector[5] = 1
+	} else {
+		vector[5] = -1
+	}
+
+	vector[6] = int8(position.HalfMoveClock())
+	return vector
+}
+
+func fileWriter(wg *sync.WaitGroup, fileCmdChan <-chan fileCmd, outPath string) {
+	defer wg.Done()
+	storedGames := 0
+	updatedGames := 0
+	outFile, err := os.OpenFile(outPath, os.O_RDWR|os.O_CREATE, 0664)
+	check(err)
+	defer outFile.Close()
+
+	bufferedWriter := bufio.NewWriter(outFile)
+	defer bufferedWriter.Flush()
+
+	for cmd := range fileCmdChan {
+		switch cmd.cmdType {
+		case "append":
+			// move to end of file
+			_, err := outFile.Seek(0, io.SeekEnd)
+			check(err)
+			// record current offset
+			offset, err := outFile.Seek(0, io.SeekCurrent)
+			check(err)
+			// write new record
+			_, err = bufferedWriter.Write(cmd.data)
+			check(err)
+
+			check(err)
+			// return offset
+			cmd.result <- offset
+			storedGames++
+
+		case "update":
+			_, err := outFile.Seek(cmd.offset, io.SeekStart)
+			check(err)
+			_, err = outFile.Write(cmd.data)
+			check(err)
+			updatedGames++
+		}
+
+		if storedGames%1_000_000 == 0 {
+			fmt.Printf("Stored Positions: %v, updated positions: %v\n", storedGames, updatedGames)
+		}
+
+	}
+	fmt.Printf("FINAL: Stored Positions: %v, updated positions: %v\n", storedGames, updatedGames)
 }
 
 func databaseWriter(positionChan <-chan positionStruct, db *sql.DB, wg *sync.WaitGroup) {
@@ -205,11 +371,10 @@ func databaseWriter(positionChan <-chan positionStruct, db *sql.DB, wg *sync.Wai
 	check(err)
 	storedGames := 0
 	updatedGames := 0
-	discardedGames := 0
 	for pos := range positionChan {
 		var storedElo int16
 		err = tx.QueryRow("SELECT elo FROM positions WHERE fen = ?", pos.fen).Scan(&storedElo)
-		if errors.Is(err, sql.ErrNoRows) {
+		if err == sql.ErrNoRows {
 			storedGames++
 			// no position found so we insert
 			_, err = tx.Exec("INSERT INTO positions (fen, move, elo) VALUES (?, ?, ?)", pos.fen, pos.move, pos.elo)
@@ -226,15 +391,10 @@ func databaseWriter(positionChan <-chan positionStruct, db *sql.DB, wg *sync.Wai
 					tx.Rollback()
 					fmt.Printf("ERROR in update: %v\n", err)
 				}
-			} else {
-				discardedGames++
 			}
-		} else {
-			fmt.Printf("Error in DB writer: %v", err)
-			continue
 		}
-		if storedGames%1_000_000 == 0 && storedGames != 0 {
-			fmt.Printf("Pos inserted: %v, pos updated: %v\n, discarded: ", storedGames, updatedGames, discardedGames)
+		if storedGames%1_000_000 == 0 {
+			fmt.Printf("Pos inserted: %v, pos updated: %v", storedGames, updatedGames)
 		}
 	}
 	err = tx.Commit()

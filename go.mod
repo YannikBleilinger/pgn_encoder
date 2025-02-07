@@ -2,6 +2,9 @@ module chessDataCuration
 
 go 1.23
 
-require github.com/corentings/chess v0.0.0-20241113092200-3f44c4e3e959
+require (
+	github.com/corentings/chess/v2 v2.0.3
+	github.com/mattn/go-sqlite3 v1.14.24
+)
 
-require gonum.org/v1/hdf5 v0.0.0-20210714002203-8c5d23bc6946 // indirect
+require golang.org/x/exp v0.0.0-20250128182459-e0ece0dbea4c // indirect
